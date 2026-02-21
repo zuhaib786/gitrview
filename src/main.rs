@@ -9,67 +9,102 @@ use ratatui::{
     Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    style::{Color, Modifier, Style},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
 use std::io::stdout;
 
-fn main() -> Result<()> {
-    // --- Setup terminal ---
+// This struct is the entire memory of our app
+struct App {
+    commits: Vec<String>,
+    list_state: ListState, // ratatui tracks which item is highlighted
+}
+
+impl App {
+    fn new(commits: Vec<String>) -> Self {
+        let mut list_state = ListState::default();
+        list_state.select(Some(0)); // start with first item selected
+        Self {
+            commits,
+            list_state,
+        }
+    }
+
+    fn move_down(&mut self) {
+        let current = self.list_state.selected().unwrap_or(0);
+        let next = (current + 1).min(self.commits.len().saturating_sub(1));
+        self.list_state.select(Some(next));
+    }
+
+    fn move_up(&mut self) {
+        let current = self.list_state.selected().unwrap_or(0);
+        let prev = current.saturating_sub(1);
+        self.list_state.select(Some(prev));
+    }
+}
+
+fn main() -> anyhow::Result<()> {
     enable_raw_mode()?;
     let mut stdout = stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    // --- Load commits from the current directory's git repo ---
     let commits = load_commits()?;
+    let mut app = App::new(commits);
 
-    // --- Main loop ---
     loop {
         terminal.draw(|frame| {
-            // Split the screen into two vertical sections
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Min(0),    // commit list takes remaining space
-                    Constraint::Length(1), // status bar is exactly 1 line tall
-                ])
+                .constraints([Constraint::Min(0), Constraint::Length(1)])
                 .split(frame.area());
 
-            // Build a list widget from our commits
-            let items: Vec<ListItem> = commits.iter().map(|c| ListItem::new(c.as_str())).collect();
+            let items: Vec<ListItem> = app
+                .commits
+                .iter()
+                .map(|c| ListItem::new(c.as_str()))
+                .collect();
 
-            let list =
-                List::new(items).block(Block::default().borders(Borders::ALL).title("Commits"));
+            let list = List::new(items)
+                .block(Block::default().borders(Borders::ALL).title("Commits"))
+                // This style applies to the selected item
+                .highlight_style(
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )
+                .highlight_symbol("▶ ");
 
-            frame.render_widget(list, chunks[0]);
+            // Notice: render_stateful_widget instead of render_widget
+            frame.render_stateful_widget(list, chunks[0], &mut app.list_state);
 
-            // Status bar
-            let status = Paragraph::new(" q: quit");
+            let status = Paragraph::new(" j/k: navigate  q: quit");
             frame.render_widget(status, chunks[1]);
         })?;
 
-        // Handle input
         if let Event::Key(key) = event::read()? {
-            if key.code == KeyCode::Char('q') {
-                break;
+            match key.code {
+                KeyCode::Char('q') => break,
+                KeyCode::Char('j') | KeyCode::Down => app.move_down(),
+                KeyCode::Char('k') | KeyCode::Up => app.move_up(),
+                _ => {}
             }
         }
     }
 
-    // --- Teardown terminal (IMPORTANT: always restore terminal state) ---
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     Ok(())
 }
 
-fn load_commits() -> Result<Vec<String>> {
+fn load_commits() -> anyhow::Result<Vec<String>> {
     let repo = Repository::open(".")?;
     let mut revwalk = repo.revwalk()?;
     revwalk.push_head()?;
 
     let commits = revwalk
-        .take(20) // only load last 20 for now
+        .take(20)
         .filter_map(|id| {
             let id = id.ok()?;
             let commit = repo.find_commit(id).ok()?;
